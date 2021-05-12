@@ -40,11 +40,11 @@ class Sentinel2Loader:
         self.cacheTilesData=cacheTilesData
         self.nirBand=nirBand
 
-    
+
     def getProductBandTiles(self, geoPolygon, bandName, resolution, dateReference):
         """Downloads and returns file names with Sentinel2 tiles that best fit the polygon area at the desired date reference. It will perform up/downsampling if deriveResolutions is True and the desired resolution is not available for the required band."""
-        logger.debug("Getting contents. band=%s, resolution=%s, date=%s", bandName, resolution, dateReference)        
-        
+        logger.debug("Getting contents. band=%s, resolution=%s, date=%s", bandName, resolution, dateReference)
+
         #find tiles that intercepts geoPolygon within date-tolerance and date+dateTolerance
         dateTolerance = timedelta(days=self.dateToleranceDays)
         dateObj = datetime.now()
@@ -53,13 +53,13 @@ class Sentinel2Loader:
 
         dateFrom = dateObj-dateTolerance
         dateTo = dateObj
-        
+
         dateL2A = datetime.strptime('2018-12-18', '%Y-%m-%d')
         productLevel = '2A'
         if dateObj < dateL2A:
             logger.debug('Reference date %s before 2018-12-18. Will use Level1C tiles (no atmospheric correction)' % (dateObj))
             productLevel = '1C'
-        
+
         resolutionDownload = resolution
         if self.deriveResolutions:
             if productLevel=='2A':
@@ -86,7 +86,7 @@ class Sentinel2Loader:
             (bbox[2], bbox[1]), (bbox[2], bbox[3])]
 
         area = Polygon(geoPolygon).wkt
-        
+
         #query cache key
         area_hash = hashlib.md5(area.encode()).hexdigest()
         apicache_file = self.dataPath + "/apiquery/Sentinel-2-S2MSI%s-%s-%s-%s-%s-%s.csv" % (productLevel, area_hash, dateFrom.strftime("%Y%m%d"), dateTo.strftime("%Y%m%d"), self.cloudCoverage[0], self.cloudCoverage[1])
@@ -99,7 +99,7 @@ class Sentinel2Loader:
             else:
                 logger.debug("Querying remote API")
                 productType = 'S2MSI%s' % productLevel
-                products = self.api.query(area, 
+                products = self.api.query(area,
                                                date=(dateFrom.strftime("%Y%m%d"), dateTo.strftime("%Y%m%d")),
                                                platformname='Sentinel-2', producttype=productType, cloudcoverpercentage=self.cloudCoverage)
                 products_df = self.api.to_dataframe(products)
@@ -110,7 +110,7 @@ class Sentinel2Loader:
 
         if len(products_df)==0:
             raise Exception('Could not find any tiles for the specified parameters')
-        
+
         products_df_sorted = products_df.sort_values(['ingestiondate','cloudcoverpercentage'], ascending=[False, False])
 
         #select the best product. if geoPolygon() spans multiple tiles, select the best of them
@@ -122,12 +122,12 @@ class Sentinel2Loader:
         for index, pf in products_df_sorted.iterrows():
             #osgeo.ogr.Geometry
             footprint = gmlToPolygon(pf['gmlfootprint'])
-            
+
             if missing.area>0:
                 if missing.intersects(footprint)==True:
                     missing = (missing.symmetric_difference(footprint)).difference(footprint)
                     selectedTiles.append(index)
-                    footprints.append(footprint)                
+                    footprints.append(footprint)
 
         if missing.area>0:
             raise Exception('Could not find tiles for the whole selected area at date range')
@@ -167,7 +167,7 @@ class Sentinel2Loader:
             m1 = re.search(rexp1, mcontents)
             if m1==None:
                 raise Exception("Could not find product date from metadata")
-                
+
             date1 = m1.group(1)
             downloadFilename = self.dataPath + "/products/%s/%s/%s.tiff" % (date1, sp['uuid'], m.group(2))
             if not os.path.exists(os.path.dirname(downloadFilename)):
@@ -178,40 +178,46 @@ class Sentinel2Loader:
                 tmp_tile_filetiff = "%s/tmp/%s.tiff" % (self.dataPath, uuid.uuid4().hex)
                 if not os.path.exists(os.path.dirname(tmp_tile_filejp2)):
                     os.makedirs(os.path.dirname(tmp_tile_filejp2))
-                        
+
                 if productLevel=='2A':
                     url = "https://apihub.copernicus.eu/apihub/odata/v1/Products('%s')/Nodes('%s.SAFE')/Nodes('GRANULE')/Nodes('%s')/Nodes('IMG_DATA')/Nodes('R%s')/Nodes('%s.jp2')/$value" % (sp['uuid'], sp['title'], m.group(1), resolutionDownload, m.group(2))
                 elif productLevel=='1C':
                     url = "https://apihub.copernicus.eu/apihub/odata/v1/Products('%s')/Nodes('%s.SAFE')/Nodes('GRANULE')/Nodes('%s')/Nodes('IMG_DATA')/Nodes('%s.jp2')/$value" % (sp['uuid'], sp['title'], m.group(1), m.group(2))
-                    
                 logger.info('Downloading tile uuid=\'%s\', resolution=\'%s\', band=\'%s\', date=\'%s\'', sp['uuid'], resolutionDownload, bandName, date1)
-                downloadFile(url, tmp_tile_filejp2, self.user, self.password)
-                #remove near black features on image border due to compression artifacts. if not removed, some black pixels 
+                try:
+                    downloadFile(url, tmp_tile_filejp2, self.user, self.password)
+                except:
+                    logger.debug("Download with the url below has failed.\n%s", url)
+                    url = "https://apihub.copernicus.eu/apihub/odata/v1/Products('%s')/Nodes('%s.SAFE')/Nodes('%s.jp2')/$value" % (sp['uuid'], sp['title'], m.group(2))
+                    logger.debug("Retrying with the following alternate url.\n%s", url)
+                    downloadFile(url, tmp_tile_filejp2, self.user, self.password)
+
+                #remove near black features on image border due to compression artifacts. if not removed, some black pixels
                 #will be present on final image, specially when there is an inclined crop in source images
                 if bandName=='TCI':
                     logger.debug('Removing near black compression artifacts')
-                    
+
                     ret = os.system("which nearblack")
                     if ret != 0:
                         raise Exception("gdal nearblack utility was not found in the system. install it")
-                        
+
                     ret = os.system("which gdal_translate")
                     if ret != 0:
                         raise Exception("gdal gdal_translate utility was not found in the system. install it")
-                        
+
                     ret = os.system("nearblack -o %s %s" % (tmp_tile_filetiff, tmp_tile_filejp2))
                     if ret != 0:
                         raise Exception("Error during 'nearblack' execution. code=%d" % ret)
-                        
+
                     ret = os.system("gdal_translate %s %s" % (tmp_tile_filetiff, downloadFilename))
                     if ret != 0:
                         raise Exception("Error during 'gdal_translate' execution. code=%d" % ret)
-                        
+
                     os.remove(tmp_tile_filetiff)
                 else:
                     os.system("gdal_translate %s %s" % (tmp_tile_filejp2, downloadFilename))
                 os.remove(tmp_tile_filejp2)
-                    
+
             else:
                 logger.debug('Reusing tile data from cache')
 
@@ -246,7 +252,7 @@ class Sentinel2Loader:
         tmp_file = "%s/tmp/%s.tiff" % (self.dataPath, uuid.uuid4().hex)
         if not os.path.exists(os.path.dirname(tmp_file)):
             os.makedirs(os.path.dirname(tmp_file))
-        
+
         #define output bounds in destination srs reference
         bounds = desiredRegion.bounds
         s1 = convertWGS84To3857(bounds[0], bounds[1])
@@ -254,7 +260,7 @@ class Sentinel2Loader:
 
         logger.debug('Combining tiles into a single image. sources=%s tmpfile=%s' % (source_tiles, tmp_file))
         os.system("gdalwarp -multi -srcnodata 0 -t_srs EPSG:3857 -te %s %s %s %s %s %s" % (s1[0],s1[1],s2[0],s2[1],source_tiles,tmp_file))
-        
+
         return tmp_file
 
 
@@ -265,13 +271,13 @@ class Sentinel2Loader:
         dateToObj = datetime.strptime(dateTo, '%Y-%m-%d')
         dateRef = dateFromObj
         regionHistoryFiles = []
-        
+
         if visibleLandPolygon is None:
             visibleLandPolygon = geoPolygon
-        
+
         lastSuccessfulFile = None
         pendingInterpolations = 0
-        
+
         while dateRef <= dateToObj:
             logger.debug(dateRef)
             dateRefStr = dateRef.strftime("%Y-%m-%d")
@@ -298,7 +304,7 @@ class Sentinel2Loader:
                         ldata[ldata==10] = cirrus
                         ldata[ldata==11] = 1
                         os.remove(labelsFile)
-                        
+
                         s = np.shape(ldata)
                         visibleLandRatio = np.sum(ldata)/(s[0]*s[1])
 
@@ -317,7 +323,7 @@ class Sentinel2Loader:
                 tmp_tile_file = "%s/tmp/%s-%s-%s-%s.tiff" % (self.dataPath, dateRefStr, bandOrIndexName, resolution, uuid.uuid4().hex)
 
                 useImage = True
-                
+
                 if pendingInterpolations>0:
                     previousData = gdal.Open(lastSuccessfulFile).ReadAsArray()
                     nextData = gdal.Open(regionFile).ReadAsArray()
@@ -327,7 +333,7 @@ class Sentinel2Loader:
                     na = np.empty(np.shape(previousData))
 #                     print("INT")
 #                     print(np.shape(na))
-                    
+
                     #FIXME NOT WORKING. PERFORM 2D TIME INTERPOLATION
                     raise Exception('Interpolation not yet implemented')
                     logger.info("Calculating %s interpolated images" % pendingInterpolations)
@@ -337,7 +343,7 @@ class Sentinel2Loader:
                     series.add([nextData])
                     idata = series.interpolate()
                     # print(np.shape(idata))
-                    
+
                     pendingInterpolations = 0
 
                 #add good image
@@ -356,24 +362,24 @@ class Sentinel2Loader:
                         raise e
 
             dateRef = dateRef + timedelta(days=daysStep)
-            
+
         return regionHistoryFiles
-    
+
     def getRegionBand(self, geoPolygon, bandName, resolution, dateReference):
         regionTileFiles = self.getProductBandTiles(geoPolygon, bandName, resolution, dateReference)
         return self.cropRegion(geoPolygon, regionTileFiles)
-    
+
     def _getBandDataFloat(self, geoPolygon, bandName, resolution, dateReference):
         bandFile = self.getRegionBand(geoPolygon, bandName, resolution, dateReference)
-        
+
         gdalBand = gdal.Open(bandFile)
         geoTransform = gdalBand.GetGeoTransform()
         projection = gdalBand.GetProjection()
-        
+
         data = gdalBand.ReadAsArray().astype(np.float)
         os.remove(bandFile)
         return data, geoTransform, projection
-        
+
     def getRegionIndex(self, geoPolygon, indexName, resolution, dateReference):
         if indexName=='NDVI':
             #get band 04
@@ -410,11 +416,11 @@ class Sentinel2Loader:
             tmp_file = "%s/tmp/ndmi-%s.tiff" % (self.dataPath, uuid.uuid4().hex)
             saveGeoTiff(ndwi, tmp_file, geoTransform, projection)
             return tmp_file
-        
+
         elif indexName=='EVI':
             #https://github.com/sentinel-hub/custom-scripts/tree/master/sentinel-2
             # index = 2.5 * (B08 - B04) / ((B08 + 6.0 * B04 - 7.5 * B02) + 1.0)
-            
+
             #get band 04
             b04,geoTransform,projection = self._getBandDataFloat(geoPolygon, 'B04', resolution, dateReference)
             #get band 08
@@ -433,4 +439,3 @@ class Sentinel2Loader:
 
     def cleanupCache(self, filesNotUsedDays):
         os.system("find %s -type f -name '*' -mtime +%s -exec rm {} \;" % (self.dataPath, filesNotUsedDays))
-        
