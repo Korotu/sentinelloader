@@ -137,6 +137,19 @@ class Sentinel2Loader:
 #         g = gpd.GeoSeries(footprints)
 #         g.plot(cmap=plt.get_cmap('jet'), alpha=0.5)
 
+        offline_product_count = 0
+        for index, sp in products_df.loc[selectedTiles].iterrows():
+            url = "https://apihub.copernicus.eu/apihub/odata/v1/Products('%s')/Online/$value" % (sp['uuid'])
+            r = requests.get(url, auth=(self.user, self.password))
+            if r.status_code != 200:
+                raise Exception("Could not get info on whether product is online. status=%s" % r.status_code)
+            if r.text == "false":
+                offline_product_count += 1
+        if offline_product_count != 0:
+            # Calculate an estimate on how long in hours data retrieval requests would require to be sent for all offline files
+            estimated_time = int(offline_product_count / 20) * 12 + offline_product_count % 20 * 0.5
+            raise Exception("There are {} offline products out of {} required product(s). It will take {:.1f} hour(s) to request for all offline products to be brought online.".format(offline_product_count, len(products_df), estimated_time))
+
         #download tiles data
         tileFiles = []
         for index, sp in products_df.loc[selectedTiles].iterrows():
